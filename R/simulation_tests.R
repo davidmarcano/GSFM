@@ -1,42 +1,154 @@
-#' Generate synthetic data for lattice model testing
+#' Initialize Latent Variables for Copula Model
 #'
-#' @param L Number of groups
-#' @param n Vector of sample sizes for each group
-#' @param p Number of variables
-#' @param continuous Logical, whether to generate continuous data
-#' @param rho Spatial correlation parameter
-#' @param W Adjacency matrix for spatial structure
-#' @return List containing generated data and true parameters
+#' Initializes latent variables (zs) for a copula model with mixed variable types.
+#' For ordinal variables, maintains rank ordering through truncation bounds.
+#' For binary variables, uses simple truncation at 0.
+#'
+#' @param x Observed data matrix (n x p)
+#' @param var_types Character vector specifying variable types:
+#'        "ordinal" or "binary" for each column (length p)
+#' @param init_sd Standard deviation for initialization normal distribution (default = 10)
+#' @return Matrix of initialized latent variables (n x p)
+#'
+#' @details
+#' For ordinal variables:
+#' - Maintains observed rank ordering through truncation bounds
+#' - Uses a large initialization variance (init_sd) to allow flexibility
+#' For binary variables:
+#' - Values initialized as N(0, init_sd) truncated below/above 0 depending on observed value
+#'
+#' @examples
+#' # Binary data only
+#' bin_data <- matrix(rbinom(100, 1, 0.5), ncol = 5)
+#' zs <- init_zs_copula(bin_data, rep("binary", 5))
+#'
+#' # Mixed ordinal/binary
+#' mixed_data <- cbind(sample(1:5, 100, replace = TRUE),
+#'                    matrix(rbinom(400, 1, 0.5), ncol = 4))
+#' zs <- init_zs_copula(mixed_data, c("ordinal", rep("binary", 4)))
+#' @importFrom truncnorm rtruncnorm
+init_zs_copula <- function(x, var_types, init_sd = 10) {
+  # Input validation
+  if (missing(var_types)) {
+    stop("var_types argument must be specified")
+  }
+  if (ncol(x) != length(var_types)) {
+    stop("Length of var_types must match number of columns in x")
+  }
+  if (!all(var_types %in% c("ordinal", "binary"))) {
+    stop("var_types must contain only 'ordinal' or 'binary'")
+  }
+  if (any(is.na(x))) {
+    stop("Input matrix x contains missing values")
+  }
+
+  n <- nrow(x)
+  p <- ncol(x)
+  zs <- matrix(NA, nrow = n, ncol = p)
+
+  for (j in 1:p) {
+    is_ordinal <- var_types[j] == "ordinal"
+
+    for (i in 1:n) {
+      if (is_ordinal) {
+        # Handle ordinal variable with rank-preserving initialization
+        current_value <- x[i, j]
+
+        # Find bounds based on already initialized values
+        lb <- if (any(x[1:i, j] < current_value, na.rm = TRUE)) {
+          max(zs[x[1:i, j] < current_value, j], na.rm = TRUE)
+        } else -Inf
+
+        ub <- if (any(x[1:i, j] > current_value, na.rm = TRUE)) {
+          min(zs[x[1:i, j] > current_value, j], na.rm = TRUE)
+        } else Inf
+
+        zs[i, j] <- truncnorm::rtruncnorm(1, a = lb, b = ub, mean = 0, sd = init_sd)
+
+      } else {
+        # Handle binary variable
+        if (x[i, j] == 1) {
+          zs[i, j] <- truncnorm::rtruncnorm(1, a = 0, b = Inf, mean = 0, sd = init_sd)
+        } else {
+          zs[i, j] <- truncnorm::rtruncnorm(1, a = -Inf, b = 0, mean = 0, sd = init_sd)
+        }
+      }
+    }
+  }
+
+  return(zs)
+}
+
+#' Generate Synthetic Data for Lattice Model
+#'
+#' Creates simulated data for testing lattice models, handling both continuous and discrete cases,
+#' and properly supporting single-group (L=1) scenarios.
+#'
+#' @param L Number of groups (default: 3)
+#' @param n Vector of sample sizes for each group (default: c(100, 100, 100))
+#' @param p Number of variables (default: 5)
+#' @param continuous Logical for continuous data (TRUE) or discrete (FALSE) (default: TRUE)
+#' @param rho Spatial correlation parameter (default: 0.5)
+#' @param W Optional adjacency matrix for spatial structure (default: NULL)
+#' @return List containing:
+#' \itemize{
+#'   \item data - List of observed data matrices
+#'   \item latent - List of latent variables (for discrete case) or NULL
+#'   \item true_params - List of true parameter values used in generation
+#' }
+#' @export
+#' @importFrom MASS mvrnorm
+#' @importFrom BDgraph rgwish
 generate_synthetic_data <- function(L = 3, n = c(100, 100, 100), p = 5,
                                     continuous = TRUE, rho = 0.5, W = NULL) {
 
+  # Validate inputs
+  if (length(n) != L) {
+    stop("Length of n must equal L")
+  }
+  if (rho <= -1 || rho >= 1) {
+    stop("rho must be between -1 and 1")
+  }
+
   # Generate proximity weights matrix if not provided
-  if(is.null(W)) {
+  if (is.null(W)) {
     W <- matrix(0, L, L)
-    W[1,2] <- W[2,1] <- 1
-    W[2,3] <- W[3,2] <- 1
+    if (L > 1) {
+      # Create simple chain structure for L > 1
+      for (i in 1:(L-1)) {
+        W[i, i+1] <- W[i+1, i] <- 1
+      }
+    }
+  } else {
+    if (nrow(W) != L || ncol(W) != L) {
+      stop("W must be L x L matrix")
+    }
   }
 
   # Generate true parameters
   true_params <- list()
 
-  # 1. Generate spatial parameters
+  # 1. Generate spatial parameters (handle L=1 case specially)
   I_L <- diag(L)
-  true_kw <- (L - 1) * solve(I_L - rho * W)
+  if (L == 1) {
+    true_kw <- matrix(1, 1, 1)  # Single group case
+  } else {
+    true_kw <- (L - 1) * solve(I_L - rho * W)
+  }
   true_mus <- MASS::mvrnorm(1, rep(0, L), solve(true_kw))
 
   # 2. Generate group-specific parameters
   true_gl <- true_kl <- true_lambda <- true_alpha <- vector("list", L)
   x <- z <- vector("list", L)
 
-  for(l in 1:L) {
-    # Generate graph structure (triangular)
+  for (l in 1:L) {
+    # Generate graph structure (sparse upper triangular)
     true_gl[[l]] <- matrix(0, p, p)
     true_gl[[l]][upper.tri(true_gl[[l]])] <- rbinom(p*(p-1)/2, 1, 0.3)
     true_gl[[l]] <- true_gl[[l]] + t(true_gl[[l]])
 
     # Generate precision matrix
-    true_kl[[l]] <- rgwish(1, true_gl[[l]], 3, diag(p))
+    true_kl[[l]] <- BDgraph::rgwish(1, true_gl[[l]], 3, diag(p))
 
     # Generate loadings and intercepts
     true_lambda[[l]] <- abs(rnorm(p, 1, 0.2))
@@ -45,10 +157,10 @@ generate_synthetic_data <- function(L = 3, n = c(100, 100, 100), p = 5,
     # Generate factors
     f <- rnorm(n[l], true_mus[l], 1)
 
-    # Generate continuous or discrete data
-    if(continuous) {
+    # Generate data
+    if (continuous) {
       # Continuous case
-      epsilon <- MASS::mvrnorm(n[l], rep(0,p), solve(true_kl[[l]]))
+      epsilon <- MASS::mvrnorm(n[l], rep(0, p), solve(true_kl[[l]]))
       x[[l]] <- t(true_alpha[[l]] + true_lambda[[l]] * f + t(epsilon))
     } else {
       # Discrete case (probit model)
@@ -56,25 +168,21 @@ generate_synthetic_data <- function(L = 3, n = c(100, 100, 100), p = 5,
       x[[l]] <- matrix(NA, n[l], p)
 
       latent <- t(true_alpha[[l]] + true_lambda[[l]] * f +
-                    t(MASS::mvrnorm(n[l], rep(0,p), solve(true_kl[[l]]))))
+                    t(MASS::mvrnorm(n[l], rep(0, p), solve(true_kl[[l]])))
 
-      for(j in 1:p) {
-        if(j == 1) {
-          # First variable is ordinal (age-like)
-          breaks <- c(-Inf, -1, 0, 1, Inf)
-          x[[l]][,j] <- as.numeric(cut(latent[,j], breaks))
-        } else {
-          # Other variables are binary
-          x[[l]][,j] <- ifelse(latent[,j] > 0, 1, 0)
-        }
-      }
-      z[[l]] <- latent
+                  # First variable is ordinal, others binary
+                  x[[l]][, 1] <- as.numeric(cut(latent[, 1],
+                                                breaks = c(-Inf, -1, 0, 1, Inf)))
+                  if (p > 1) {
+                    x[[l]][, 2:p] <- ifelse(latent[, 2:p] > 0, 1, 0)
+                  }
+                  z[[l]] <- latent
     }
   }
 
   list(
     data = x,
-    latent = if(!continuous) z else NULL,
+    latent = if (!continuous) z else NULL,
     true_params = list(
       gl = true_gl,
       kl = true_kl,
