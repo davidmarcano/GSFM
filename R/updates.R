@@ -4,6 +4,126 @@ library(invgamma)
 library(tmvtnorm)
 library(truncnorm)
 
+#' Update Latent Factor Scores in Spatial Model
+#'
+#' Updates the latent factor scores (f) for observations in a spatial model using Gibbs sampling.
+#' The function calculates conditional posterior distributions for each factor score and samples
+#' from these distributions.
+#'
+#' @param K Current precision matrix (p x p)
+#' @param x Data matrix (n x p) for the current group
+#' @param lambda Current loading vector (length p)
+#' @param alpha Current intercept vector (length p)
+#' @param mu Current mean parameter for the factors
+#'
+#' @return A vector of updated factor scores (length n)
+#'
+#' @details
+#' For each observation j, the function:
+#' \enumerate{
+#'   \item Calculates the conditional posterior mean for f[j]
+#'   \item Calculates the conditional posterior variance
+#'   \item Samples a new f[j] from the normal distribution
+#'   \item Centers the final factor scores
+#' }
+#'
+#' @examples
+#' # Example usage:
+#' # updated_f <- update_factors_spatial(K, x, lambda, alpha, mu)
+#'
+#' @export
+update_factors_spatial <- function(K, x, lambda, alpha, mu) {
+  # Precompute constant terms
+  lambda_sq <- t(lambda) %*% lambda
+  lambda_K_lambda <- (t(lambda) %*% solve(K) %*% lambda) / lambda_sq
+  sigma_f <- sqrt(lambda_K_lambda / (lambda_sq + lambda_K_lambda))
+
+  # Initialize updated factors
+  n_obs <- nrow(x)
+  updated_f <- numeric(n_obs)
+
+  # Update each factor score
+  for (j in 1:n_obs) {
+    # Calculate conditional posterior mean
+    numerator <- (t(lambda) %*% (x[j, ] - alpha)) + lambda_K_lambda * mu
+    posterior_mean <- numerator / (lambda_sq + lambda_K_lambda)
+
+    # Sample from conditional posterior
+    updated_f[j] <- rnorm(1, mean = posterior_mean, sd = sigma_f)
+  }
+
+  # Center the factor scores
+  updated_f <- updated_f - mean(updated_f)
+
+  return(updated_f)
+}
+
+
+#' Update Group Means in Lattice Model
+#'
+#' Updates the mean parameters (mus) for each group in the lattice model using Gibbs sampling.
+#' Handles both single-group and multi-group cases.
+#'
+#' @param Kw Current spatial precision matrix (L x L)
+#' @param mus Current mean parameters (vector of length L)
+#' @param f List of factor scores (length L, each element vector of size n_l)
+#' @param n Vector of sample sizes for each group (length L)
+#' @return Updated mean parameters (vector of length L)
+update_mus_list <- function(Kw, mus, f, n) {
+  L <- length(mus)
+  new_mus <- numeric(L)
+
+  if (L == 1) {
+    # Special case for single group
+    mu <- -sum(f[[1]])
+    vars <- 1 / (n + Kw[1,1])
+    new_mus <- rnorm(1, mean = mu, sd = sqrt(vars))
+  } else {
+    # General case for multiple groups
+    for (l in 1:L) {
+      # Calculate conditional mean and variance
+      spatial_effect <- sum(Kw[l, -l] * mus[-l]) / Kw[l, l]
+      data_effect <- sum(f[[l]])
+      mu <- -spatial_effect + data_effect
+      vars <- 1 / (n[l] + Kw[l, l])
+
+      # Sample new mu
+      new_mus[l] <- rnorm(1, mean = mu, sd = sqrt(vars))
+    }
+  }
+
+  return(new_mus)
+}
+
+#' Update Spatial Precision Matrix
+#'
+#' Updates the spatial precision matrix Kw using a G-Wishart distribution.
+#' Ensures numerical symmetry and handles single-group case.
+#'
+#' @param deltaw Degrees of freedom for G-Wishart prior
+#' @param rho Spatial autocorrelation parameter
+#' @param W Adjacency matrix for spatial structure (L x L)
+#' @param mus Current mean parameters (vector of length L)
+#' @return Updated spatial precision matrix (L x L)
+update_kw <- function(deltaw, rho, W, mus) {
+  L <- length(mus)
+  I_L <- diag(1, L, L)
+
+  # Calculate scale matrix D
+  D <- (deltaw - 2) * solve(I_L - rho * W) + mus %*% t(mus)
+
+  # Ensure numerical symmetry
+  D[lower.tri(D)] <- t(D)[lower.tri(D)]
+
+  # Handle single-group case
+  if (L == 1) {
+    W <- matrix(W, 1, 1)
+  }
+
+  # Sample from G-Wishart distribution
+  rgwish(1, W, b = deltaw + 1, D = D)
+}
+
 #' Update the Factors
 #'
 #' This function updates the factors (f) based on the current values of lambda and alpha.
