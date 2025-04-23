@@ -1,4 +1,40 @@
 
+
+#' Calculate Shifted Observations
+#'
+#' Centers the observed data by subtracting the intercept (alpha) and factor components (lambda*f).
+#' This creates "shifted" observations used in conditional calculations.
+#'
+#' @param x Numeric matrix of observed data (n x p)
+#' @param alpha Numeric vector of intercept parameters (length p)
+#' @param lambda Numeric vector of factor loadings (length p)
+#' @param f Numeric vector of factor scores (length n)
+#' @return Numeric matrix of shifted observations (n x p)
+#'
+#' @examples
+#' # Sample data
+#' x <- matrix(rnorm(100), 20, 5)
+#' alpha <- rnorm(5)
+#' lambda <- abs(rnorm(5))
+#' f <- rnorm(20)
+#'
+#' # Calculate shifted values
+#' x_shifted <- calculate_shifted_x(x, alpha, lambda, f)
+#'
+#' @export
+calculate_shifted_x <- function(x, alpha, lambda, f) {
+  # Input validation
+  if (ncol(x) != length(alpha) || ncol(x) != length(lambda)) {
+    stop("Dimensions of x, alpha, and lambda do not match")
+  }
+  if (nrow(x) != length(f)) {
+    stop("Number of observations in x doesn't match length of f")
+  }
+
+  # Vectorized calculation
+  x - outer(f, lambda) - matrix(alpha, nrow = nrow(x), ncol = ncol(x), byrow = TRUE)
+}
+
 #' Initialize MCMC chains for lattice model
 #'
 #' Creates and initializes all the necessary chains for the Gibbs sampler.
@@ -7,7 +43,7 @@
 #' @param L Number of groups
 #' @param p Number of variables
 #' @param n Vector of sample sizes for each group
-#' @param start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @param start_lambda Starting values for lambda parameters
 #' @param start_alpha Starting values for alpha parameters
 #' @param start_mus Starting values for mu parameters
@@ -23,28 +59,50 @@
 #' @param non_continuous Logical indicating non-continuous data
 #' @param z Starting values for latent variables (if non-continuous)
 #' @return List containing initialized chains for all parameters
-initialize_chains <- function(steps, L, p, n, start, start_lambda, start_alpha,
+initialize_chains <- function(steps, L, p, n, has_start, start_lambda, start_alpha,
                               start_mus, start_kw, start_f, start_delta, start_gl,
                               start_kl, start_nu, start_theta, start_gamma,
-                              start_corr_gamma, non_continuous, z) {
-
+                              start_corr_gamma, non_continuous, z, params) {
+  g_chain = initialize_g_chain(steps, p, L, start_gl, has_start) # need to initialize first
   list(
-    alpha_chain = initialize_chain(steps, p, L, start_alpha, start),
-    lambda_chain = initialize_chain(steps, p, L, start_lambda, start),
-    f_temp = initialize_f_temp(L, n, start_f, start),
-    k_chain = initialize_k_chain(steps, p, L, start_kl, start),
-    g_chain = initialize_g_chain(steps, p, L, start_gl, start),
+    alpha_chain = initialize_chain(steps, p, L, start_vals = start_alpha, has_start = has_start),
+    lambda_chain = initialize_chain(steps, p, L, start_vals = start_lambda, has_start = has_start),
+    f_temp = initialize_f_temp(L, n, start_f, has_start),
+    g_chain = g_chain,
+    k_chain = initialize_k_chain(steps, p, L, start_kl, has_start, g_chain[1,,,]),
     acceptprob_chain = array(0, c(steps, p*(p-1)/2, L)),
-    delta_chain = initialize_delta_chain(steps, L, start_delta, start),
-    mu_chain = initialize_mu_chain(steps, L, start_mus, start),
-    kw_chain = initialize_kw_chain(steps, L, start_kw, start),
-    nu_chain = initialize_nu_chain(steps, p, start_nu, start),
-    theta_chain = initialize_theta_chain(steps, L, start_theta, start),
-    gamma_chain = initialize_gamma_chain(steps, L, start_gamma, start),
-    corr_gamma_chain = initialize_corr_gamma_chain(steps, p, L, start_corr_gamma, start),
+    delta_chain = initialize_delta_chain(steps, L, start_delta, has_start, params = params),
+    mu_chain = initialize_mu_chain(steps, L, start_mus, has_start),
+    kw_chain = initialize_kw_chain(steps, L, start_kw, has_start, params = params),
+    #nu_chain = initialize_nu_chain(steps, p, start_nu, has_start, params = params),
+    #theta_chain = initialize_theta_chain(steps, L, start_theta, has_start, params = params),
+    #gamma_chain = initialize_gamma_chain(steps, L, start_gamma, has_start, params = params),
+    corr_gamma_chain = initialize_corr_gamma_chain(steps, p, L, start_corr_gamma, has_start),
     z_chain = if(non_continuous) list(z) else NULL,
     xpred = array(0, c(steps, p, L))
   )
+}
+
+#' Initialize a generic MCMC chain
+#'
+#' Helper function to initialize a single MCMC chain.
+#'
+#' @param steps Number of MCMC steps
+#' @param dim1 First dimension size
+#' @param dim2 Second dimension size (optional)
+#' @param dim3 Third dimension size (optional)
+#' @param start_vals Starting values
+#' @param has_start Logical indicating if starting values are provided
+#' @return Initialized chain array/matrix
+#' @keywords internal
+initialize_chain <- function(steps, dim1, dim2 = NULL, dim3 = NULL, start_vals, has_start) {
+  if(is.null(dim2) && is.null(dim3)) {
+    if(has_start) matrix(start_vals, steps, dim1) else matrix(0, steps, dim1)
+  } else if(is.null(dim3)) {
+    if(has_start) array(start_vals, c(steps, dim1, dim2)) else array(0, c(steps, dim1, dim2))
+  } else {
+    if(has_start) array(start_vals, c(steps, dim1, dim2, dim3)) else array(0, c(steps, dim1, dim2, dim3))
+  }
 }
 
 #' Set hyperparameters for lattice model
@@ -69,7 +127,8 @@ set_hyperparameters <- function(p, L, W) {
     beta = 5,
     a = 1,
     b = 4,
-    I_L = diag(1, L, L)
+    I_L = diag(1, L, L),
+    W = W
   )
 }
 
@@ -251,29 +310,29 @@ update_chains <- function(chains, results, L, s) {
 #' @param params List of hyperparameters
 #' @param s Current MCMC iteration
 #' @return Updated chains list
-update_shared_parameters <- function(chains, params, s) {
-  mh_updates <- mh_theta_gamma(
-    chains$g_chain[s,,,],
-    chains$theta_chain[s-1,,],
-    chains$gamma_chain[s-1,,],
-    chains$nu_chain[s-1,,],
-    params$alpha,
-    params$beta,
-    params$w
-  )
-
-  chains$theta_chain[s,,] <- mh_updates$theta
-  chains$gamma_chain[s,,] <- mh_updates$gamma
-  chains$nu_chain[s,,] <- mh_nu(
-    chains$g_chain[s,,,],
-    chains$nu_chain[s-1,,],
-    chains$theta_chain[s,,],
-    params$a,
-    params$b
-  )
-
-  return(chains)
-}
+# update_shared_parameters <- function(chains, params, s) {
+#   mh_updates <- mh_theta_gamma(
+#     chains$g_chain[s,,,],
+#     chains$theta_chain[s-1,,],
+#     chains$gamma_chain[s-1,,],
+#     chains$nu_chain[s-1,,],
+#     params$alpha,
+#     params$beta,
+#     params$w
+#   )
+#
+#   chains$theta_chain[s,,] <- mh_updates$theta
+#   chains$gamma_chain[s,,] <- mh_updates$gamma
+#   chains$nu_chain[s,,] <- mh_nu(
+#     chains$g_chain[s,,,],
+#     chains$nu_chain[s-1,,],
+#     chains$theta_chain[s,,],
+#     params$a,
+#     params$b
+#   )
+#
+#   return(chains)
+# }
 
 #' Save progress during MCMC
 #'
@@ -287,27 +346,6 @@ save_progress <- function(chains, s) {
        file = paste0(filename, s %% 200, ".RData"))
 }
 
-#' Initialize a generic MCMC chain
-#'
-#' Helper function to initialize a single MCMC chain.
-#'
-#' @param steps Number of MCMC steps
-#' @param dim1 First dimension size
-#' @param dim2 Second dimension size (optional)
-#' @param dim3 Third dimension size (optional)
-#' @param start_vals Starting values
-#' @param is_start Logical indicating if starting values are provided
-#' @return Initialized chain array/matrix
-#' @keywords internal
-initialize_chain <- function(steps, dim1, dim2 = NULL, dim3 = NULL, start_vals, is_start) {
-  if(is.null(dim2) && is.null(dim3)) {
-    if(is_start) matrix(start_vals, steps, dim1) else matrix(0, steps, dim1)
-  } else if(is.null(dim3)) {
-    if(is_start) array(start_vals, c(steps, dim1, dim2)) else array(0, c(steps, dim1, dim2))
-  } else {
-    if(is_start) array(start_vals, c(steps, dim1, dim2, dim3)) else array(0, c(steps, dim1, dim2, dim3))
-  }
-}
 
 #' Initialize factor scores chain
 #'
@@ -316,11 +354,11 @@ initialize_chain <- function(steps, dim1, dim2 = NULL, dim3 = NULL, start_vals, 
 #' @param L Number of groups
 #' @param n Vector of sample sizes
 #' @param start_f Starting values for factors
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized factor scores list
 #' @keywords internal
-initialize_f_temp <- function(L, n, start_f, is_start) {
-  if(is_start) {
+initialize_f_temp <- function(L, n, start_f, has_start) {
+  if(has_start) {
     start_f
   } else {
     lapply(n, function(nl) rnorm(nl))
@@ -335,15 +373,19 @@ initialize_f_temp <- function(L, n, start_f, is_start) {
 #' @param p Number of variables
 #' @param L Number of groups
 #' @param start_kl Starting values for precision matrices
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized precision matrices array
 #' @keywords internal
-initialize_k_chain <- function(steps, p, L, start_kl, is_start) {
-  if(is_start) {
-    array(start_kl, c(steps, p, p, L))
+initialize_k_chain <- function(steps, p, L, start_kl, has_start, g1) {
+  if(has_start) {
+    k <- array(start_kl, c(steps, p, p, L))
   } else {
-    array(0, c(steps, p, p, L))
+    k <- array(0, c(steps, p, p, L))
+    for(l in 1:L) {
+      k[1,,,l] <- BDgraph::rgwish(1, g1[,,l], D = diag(1, p, p))
+    }
   }
+  return(k)
 }
 
 #' Initialize graph structures chain
@@ -354,12 +396,12 @@ initialize_k_chain <- function(steps, p, L, start_kl, is_start) {
 #' @param p Number of variables
 #' @param L Number of groups
 #' @param start_gl Starting values for graphs
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized graph structures array
 #' @keywords internal
-initialize_g_chain <- function(steps, p, L, start_gl, is_start) {
-  if(is_start) {
-    array(start_gl, c(steps, p, p, L))
+initialize_g_chain <- function(steps, p, L, start_gl, has_start, identifiable = TRUE) {
+  if(has_start) {
+    g <- array(start_gl, c(steps, p, p, L))
   } else {
     graph <- matrix(0, p, p)
     gl <- lapply(1:L, function(l) {
@@ -368,8 +410,10 @@ initialize_g_chain <- function(steps, p, L, start_gl, is_start) {
         if(!identifiable || is_identifiable(G)) return(G)
       }
     })
-    array(unlist(gl), c(p, p, L))
+    g <- array(0, c(steps, p, p, L))
+    g[1,,,] <- simplify2array(gl)
   }
+  return(g)
 }
 
 #' Initialize delta parameters chain
@@ -379,14 +423,14 @@ initialize_g_chain <- function(steps, p, L, start_gl, is_start) {
 #' @param steps Number of MCMC steps
 #' @param L Number of groups
 #' @param start_delta Starting values for delta
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized delta parameters matrix
 #' @keywords internal
-initialize_delta_chain <- function(steps, L, start_delta, is_start) {
-  if(is_start) {
+initialize_delta_chain <- function(steps, L, start_delta, has_start, params = NULL) {
+  if(has_start) {
     matrix(start_delta, steps, L)
   } else {
-    matrix(rinvgamma(steps*L, shape = c, scale = (c*d)/2), steps, L)
+    matrix(rinvgamma(steps*L, shape = params$c, scale = (params$c*params$d)/2), steps, L)
   }
 }
 
@@ -397,11 +441,11 @@ initialize_delta_chain <- function(steps, L, start_delta, is_start) {
 #' @param steps Number of MCMC steps
 #' @param L Number of groups
 #' @param start_mus Starting values for mu
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized mu parameters matrix
 #' @keywords internal
-initialize_mu_chain <- function(steps, L, start_mus, is_start) {
-  if(is_start) {
+initialize_mu_chain <- function(steps, L, start_mus, has_start) {
+  if(has_start) {
     matrix(start_mus, steps, L)
   } else {
     matrix(0, steps, L)
@@ -415,14 +459,15 @@ initialize_mu_chain <- function(steps, L, start_mus, is_start) {
 #' @param steps Number of MCMC steps
 #' @param L Number of groups
 #' @param start_kw Starting values for Kw
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized Kw matrix array
 #' @keywords internal
-initialize_kw_chain <- function(steps, L, start_kw, is_start) {
-  if(is_start) {
+initialize_kw_chain <- function(steps, L, start_kw, has_start, params = NULL) {
+  if(has_start) {
     array(start_kw, c(steps, L, L))
   } else {
-    array(rgwish(1, W, deltaw, (deltaw - 2)*solve(I_L - rho*W)), c(steps, L, L))
+    array(rgwish(1, params$W, params$deltaw,
+                 (params$deltaw - 2)*solve(params$I_L - params$rho*params$W)), c(steps, L, L))
   }
 }
 
@@ -433,16 +478,16 @@ initialize_kw_chain <- function(steps, L, start_kw, is_start) {
 #' @param steps Number of MCMC steps
 #' @param p Number of variables
 #' @param start_nu Starting values for nu
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized nu parameters array
 #' @keywords internal
-initialize_nu_chain <- function(steps, p, start_nu, is_start) {
-  if(is_start) {
-    array(start_nu, c(steps, p, p))
-  } else {
-    array(init_nu(p, a, b), c(steps, p, p))
-  }
-}
+# initialize_nu_chain <- function(steps, p, start_nu, has_start, params = NULL) {
+#   if(has_start) {
+#     array(start_nu, c(steps, p, p))
+#   } else {
+#     array(init_nu(p, params$a, params$b), c(steps, p, p))
+#   }
+# }
 
 #' Initialize theta matrix chain
 #'
@@ -451,17 +496,17 @@ initialize_nu_chain <- function(steps, p, start_nu, is_start) {
 #' @param steps Number of MCMC steps
 #' @param L Number of groups
 #' @param start_theta Starting values for theta
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized theta matrix array
 #' @keywords internal
-initialize_theta_chain <- function(steps, L, start_theta, is_start) {
-  if(is_start) {
-    array(start_theta, c(steps, L, L))
-  } else {
-    theta_gamma <- make_theta_gamma(L, alpha, beta, w)
-    array(theta_gamma$theta, c(steps, L, L))
-  }
-}
+# initialize_theta_chain <- function(steps, L, start_theta, has_start, params = NULL) {
+#   if(has_start) {
+#     array(start_theta, c(steps, L, L))
+#   } else {
+#     theta_gamma <- make_theta_gamma(L, params$alpha, params$beta, params$w)
+#     array(theta_gamma$theta, c(steps, L, L))
+#   }
+# }
 
 #' Initialize gamma matrix chain
 #'
@@ -470,17 +515,17 @@ initialize_theta_chain <- function(steps, L, start_theta, is_start) {
 #' @param steps Number of MCMC steps
 #' @param L Number of groups
 #' @param start_gamma Starting values for gamma
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized gamma matrix array
 #' @keywords internal
-initialize_gamma_chain <- function(steps, L, start_gamma, is_start) {
-  if(is_start) {
-    array(start_gamma, c(steps, L, L))
-  } else {
-    theta_gamma <- make_theta_gamma(L, alpha, beta, w)
-    array(theta_gamma$gamma, c(steps, L, L))
-  }
-}
+# initialize_gamma_chain <- function(steps, L, start_gamma, has_start, params = NULL) {
+#   if(has_start) {
+#     array(start_gamma, c(steps, L, L))
+#   } else {
+#     theta_gamma <- make_theta_gamma(L, params$alpha, params$beta, params$w)
+#     array(theta_gamma$gamma, c(steps, L, L))
+#   }
+# }
 
 #' Initialize correlation matrices chain
 #'
@@ -490,11 +535,11 @@ initialize_gamma_chain <- function(steps, L, start_gamma, is_start) {
 #' @param p Number of variables
 #' @param L Number of groups
 #' @param start_corr_gamma Starting values for correlation matrices
-#' @param is_start Logical indicating if starting values are provided
+#' @param has_start Logical indicating if starting values are provided
 #' @return Initialized correlation matrices array
 #' @keywords internal
-initialize_corr_gamma_chain <- function(steps, p, L, start_corr_gamma, is_start) {
-  if(is_start) {
+initialize_corr_gamma_chain <- function(steps, p, L, start_corr_gamma, has_start) {
+  if(has_start) {
     array(start_corr_gamma, c(steps, p, p, L))
   } else {
     array(0, c(steps, p, p, L))

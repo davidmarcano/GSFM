@@ -9,6 +9,7 @@ library(invgamma)
 library(pheatmap)
 library(igraph)
 library(matrixcalc)
+library(parallel)
 
 lbw <- FALSE  # Global flag for low birth weight mode
 
@@ -242,7 +243,7 @@ gibbs_sampler_lattice <- function(x, steps, W, prior, prior_params, prior_ratio,
                                   start_kw = NULL, start_f = NULL, start_delta = NULL,
                                   start_gl = NULL, start_kl = NULL, start_nu = NULL,
                                   start_theta = NULL, start_gamma = NULL,
-                                  start_corr_gamma = NULL, start = FALSE,
+                                  start_corr_gamma = NULL, has_start = FALSE,
                                   non_continuous = FALSE, z = NULL, copula = FALSE) {
 
   # Validate inputs
@@ -254,14 +255,15 @@ gibbs_sampler_lattice <- function(x, steps, W, prior, prior_params, prior_ratio,
   n <- sapply(x, nrow)
   p <- ncol(x[[1]])
 
-  # Initialize chains
-  chains <- initialize_chains(steps, L, p, n, start, start_lambda, start_alpha,
-                              start_mus, start_kw, start_f, start_delta, start_gl,
-                              start_kl, start_nu, start_theta, start_gamma,
-                              start_corr_gamma, non_continuous, z)
-
   # Set hyperparameters
   params <- set_hyperparameters(p, L, W)
+
+  # Initialize chains
+  chains <- initialize_chains(steps, L, p, n, has_start, start_lambda, start_alpha,
+                              start_mus, start_kw, start_f, start_delta, start_gl,
+                              start_kl, start_nu, start_theta, start_gamma,
+                              start_corr_gamma, non_continuous, z, params)
+
 
   # Initialize copula structures if needed
   copula_structs <- NULL
@@ -282,9 +284,9 @@ gibbs_sampler_lattice <- function(x, steps, W, prior, prior_params, prior_ratio,
     chains <- update_chains(chains, results, L, s)
 
     # Update shared parameters
-    if(!non_continuous) {
-      chains <- update_shared_parameters(chains, params, s)
-    }
+    # if(!non_continuous) {
+    #   chains <- update_shared_parameters(chains, params, s)
+    # }
 
     # Update means and precision
     chains$mu_chain[s,] <- update_mus_list(chains$kw_chain[s-1,,],
